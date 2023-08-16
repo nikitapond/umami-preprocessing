@@ -211,10 +211,47 @@ class Resampling:
                 else:
                     c.sampling_fraction = self.config.sampling_fraction
 
+    def check_region_ratios(self):
+        """Checks that the ratio of jets between different regions are all the same.
+        E.g, if 8m ttbar c-jets are requested, and 4m ttbar b-jets, if we have 2m Z' c-jets,
+        we should have 1m Z' b-jets, such that all ratios are 4:1.
+        """
+        if self.config.enforce_ratio:
+            jets_per_flavour_per_region = {
+                region.name: {c.flavour.name: c.num_jets for c in components}
+                for region, components in self.components.groupby_region()
+            }
+            region_0 = list(jets_per_flavour_per_region.keys())[0]
+            jets_per_flavour_per_region_ratio = {
+                region.name: {
+                    c.flavour.name: (
+                        c.num_jets / jets_per_flavour_per_region[region_0][c.flavour.name]
+                    )
+                    for c in components
+                }
+                for region, components in self.components.groupby_region()
+            }
+            for region in jets_per_flavour_per_region_ratio:
+                region_ratios = jets_per_flavour_per_region_ratio[region].values()
+                if len(set(region_ratios)) != 1:
+                    raise ValueError(
+                        f"Ratios of jets flavours between region {region_0} and "
+                        f"{region} are not equal. "
+                    )
+
     def run(self):
         title = " Running resampling "
         log.info(f"[bold green]{title:-^100}")
         log.info(f"Resampling method: {self.config.method}")
+
+        # if self.config.enforce_ratio:
+
+        # Here we ensure that the ratio of jets between different regions are all the same
+        # i.e, if we request 80m ttbar c-jets, and 40m ttbar b-jets, we want to ensure that
+        # if we have 20m Z' c-jets, we have 10m Z' b-jets
+
+        # assert (len(set(l)) == 0 for reg, flav in jets_per_flavour_per_region_ratio.items() for l in flav.values())
+        self.check_region_ratios()
 
         # setup i/o
         for c in self.components:
