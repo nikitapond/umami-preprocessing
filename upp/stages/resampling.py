@@ -244,13 +244,7 @@ class Resampling:
         log.info(f"[bold green]{title:-^100}")
         log.info(f"Resampling method: {self.config.method}")
 
-        # if self.config.enforce_ratio:
-
-        # Here we ensure that the ratio of jets between different regions are all the same
-        # i.e, if we request 80m ttbar c-jets, and 40m ttbar b-jets, we want to ensure that
-        # if we have 20m Z' c-jets, we have 10m Z' b-jets
-
-        # assert (len(set(l)) == 0 for reg, flav in jets_per_flavour_per_region_ratio.items() for l in flav.values())
+        # Enforce ratio between regions if required
         self.check_region_ratios()
 
         # setup i/o
