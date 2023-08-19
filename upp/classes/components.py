@@ -117,7 +117,7 @@ class Components:
                     Component(
                         region,
                         sample,
-                        Flavours[name],
+                        pp_cfg.flavours[name],
                         pp_cfg.global_cuts,
                         pp_cfg.components_dir,
                         num_jets,

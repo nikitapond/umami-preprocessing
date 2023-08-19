@@ -11,6 +11,8 @@ from typing import Literal
 
 import yaml
 from ftag import Cuts
+from ftag.flavour import Flavour, Flavours, FlavourContainer
+from ftag import flavour
 from ftag.transform import Transform
 from yamlinclude import YamlIncludeConstructor
 
@@ -42,16 +44,27 @@ class PreprocessingConfig:
     num_jets_estimate: int = 1_000_000
     merge_test_samples: bool = False
     jets_name: str = "jets"
+    flavours: FlavourContainer = None
 
     def __post_init__(self):
         # postprocess paths
         for field in dataclasses.fields(self):
-            if field.type == "Path" and field.name != "out_fname":
+            if field.type == "Path" and field.name not in ["out_fname", "flavour_dict"]:
                 setattr(self, field.name, self.get_path(Path(getattr(self, field.name))))
         if not self.ntuple_dir.exists():
             raise FileNotFoundError(f"Path {self.ntuple_dir} does not exist")
         self.components_dir = self.components_dir / self.split
         self.out_fname = self.out_dir / path_append(self.out_fname, self.split)
+
+        if self.flavours:
+            with open(self.flavours) as f:
+                flavours_yaml = yaml.safe_load(f)
+            flavours_dict = {f["name"]: Flavour(cuts=Cuts.from_list(f.pop("cuts")), **f) for f in flavours_yaml}
+            assert len(flavours_dict) == len(flavours_yaml), "Duplicate flavour names detected"
+            log.info("Using custom flavours: ", flavours_dict)
+            self.flavours = FlavourContainer(flavours_dict)
+        else:
+            self.flavours = flavour.Flavours
 
         # configure classes
         sampl_cfg = copy(self.config["resampling"])
@@ -64,6 +77,7 @@ class PreprocessingConfig:
         self.transform = (
             Transform(**self.config["transform"]) if "transform" in self.config else None
         )
+
 
         # copy config
         git_hash = check_output(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent)
