@@ -41,7 +41,7 @@ def load_jets(
     """
     variables = {jets_name: [flavour_label, variable]}
     reader = H5Reader(paths, batch_size=1000, jets_name=jets_name)
-    df = reader.load(variables, num_jets=10000)[jets_name]
+    df = reader.load(variables, num_jets=100000)[jets_name]
     return df
 
 

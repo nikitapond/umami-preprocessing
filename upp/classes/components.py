@@ -130,7 +130,7 @@ class Components:
                     )
                 )
         components = cls(components)
-        if pp_cfg.sampl_cfg.method is not None:
+        if pp_cfg.sampl_cfg.method != 'none':
             components.check_flavour_ratios()
         return components
 

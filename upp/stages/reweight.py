@@ -12,70 +12,18 @@ from puma import Histogram, HistogramPlot
 import tqdm
 import argparse
 from upp.classes.reweighting_config import Reweight, ReweightConfig
+from upp.stages.hist import bin_jets
+from ftag.hdf5 import join_structured_arrays
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     return parser.parse_args()
 
-def join_structured_arrays(arrays: list):
-    """Join a list of structured numpy arrays.
-
-    See https://github.com/numpy/numpy/issues/7811
-
-    Parameters
-    ----------
-    arrays : list
-        List of structured numpy arrays to join
-
-    Returns
-    -------
-    np.array
-        A merged structured array
-    """
-    dtype: list = sum((a.dtype.descr for a in arrays), [])
-    newrecarray = np.empty(arrays[0].shape, dtype=dtype)
-    for a in arrays:
-        for name in a.dtype.names:
-            newrecarray[name] = a[name]
-
-    return newrecarray
-
-def bin_jets(array: dict, bins: list) -> np.ndarray:
-    """Create the histogram and bins for the given resampling variables.
-
-    Parameters
-    ----------
-    array : dict
-        Dict with the loaded jets and the resampling
-        variables.
-    bins : list
-        Flat list with the bins which are to be used.
-
-    Returns
-    -------
-    hist : np.ndarray, shape(nx1, nx2, nx3,...)
-        The values of the selected statistic in each two-dimensional bin.
-    out_bins : (N,) array of ints or (D,N) ndarray of ints
-        This assigns to each element of `sample` an integer that represents the
-        bin in which this observation falls.  The representation depends on the
-        `expand_binnumbers` argument.  See `Notes` for details.
-    """
-    hist, _, out_bins = binned_statistic_dd(
-        sample=s2u(array),
-        values=None,
-        statistic="count",
-        bins=bins,
-        expand_binnumbers=True,
-    )
-    out_bins -= 1
-    return hist, out_bins
-
-
-
 def calculate_weights(
     input_file : str,
     reweights : list[Reweight],
+    N : int =-1,
 ):
     '''
     Generates all the calculate_weights for the reweighting and returns them in a dict
@@ -119,8 +67,8 @@ def calculate_weights(
     all_vars = {k: list(set(v)) for k,v in all_vars.items()}
     num_in_hists = {}
     all_histograms = {}
-
-    for batch in tqdm.tqdm(reader.stream(all_vars), total=reader.num_jets / reader.batch_size):
+    num_jets = reader.num_jets if (N == -1 or N > reader.num_jets) else N
+    for batch in tqdm.tqdm(reader.stream(all_vars, num_jets=num_jets), total=num_jets / reader.batch_size):
 
         # Keep track of how many items we've used to generate our histograms
         for k, v in batch.items():
@@ -223,8 +171,6 @@ def calculate_weights(
         # Apply the target histogram function
         if rw.target_hist_func is not None:
             target = rw.target_hist_func(target)
-        
-        
 
         all_targets[rw_group][rw_rep] = target
 
@@ -251,9 +197,11 @@ def calculate_weights(
                 idx_below_min = this_idx_below_min
             else:
                 idx_below_min |= this_idx_below_min
-        # if np.any(idx_below_min):
-        #     for cls, hist in all_histograms[rw_group][rw_rep]['histograms'].items():
-        #         output_weights[rw_group][rw_rep]['weights'][cls][idx_below_min] = 0
+        # If we have any bins where we have 0 of a given flavour, we set all the
+        # weights to 0
+        if np.any(idx_below_min):
+            for cls, hist in all_histograms[rw_group][rw_rep]['histograms'].items():
+                output_weights[rw_group][rw_rep]['weights'][cls][idx_below_min] = 0
             
     return output_weights
 
@@ -331,6 +279,18 @@ def load_weights_hdf5(filename):
     return weights_dict
 
 
+def _assign_weights(this_rw, bins, to_dump):
+    this_weights = np.zeros(to_dump.shape, dtype=float)
+    
+    # This is SUPER slow - as we iterate each object, but its 
+    for i in range(this_weights.shape[0]):
+        
+        bin_idx = bins[:, i]
+        cls = to_dump[i]
+        thishist = this_rw['weights'][str(cls)][tuple(bin_idx)]
+        this_weights[i] = thishist
+    return this_weights
+
 
 def get_sample_weights(batch, calculated_weights, scale : dict):
     '''
@@ -370,19 +330,15 @@ def get_sample_weights(batch, calculated_weights, scale : dict):
             if len(rw['bins']) == 1:
                 bins = np.expand_dims(bins, axis=0)
 
-            this_weights = np.zeros(to_dump[class_var].shape, dtype=float)
             try:
-                # This is SUPER slow - as we iterate each object, but its 
-                for i in range(this_weights.shape[0]):
-                    
-                    bin_idx = bins[:, i]
-                    cls = to_dump[class_var][i]
-                    thishist = rw['weights'][str(cls)][tuple(bin_idx)]
-                    this_weights[i] = thishist
+                # Note - I tried vectorising this but its not the bottleneck so
+                # I'm leaving it as is
+                this_weights = _assign_weights(rw, bins, to_dump[class_var])
+                
+                
             except Exception as e:
                 print(f"Error in {group} {rwkey}")
                 raise
-            
             if rwkey not in scale[group]:
                 
                 # We return the scale such that the sum of all weights is equal 
@@ -411,6 +367,7 @@ def write_sample_with_weights(
     input_file : str,
     output_file : str,
     weights : dict,
+    N : int = -1,
 ):
     print("Writing weights to ", output_file)
     all_groups = {}
@@ -418,7 +375,7 @@ def write_sample_with_weights(
         for group in f.keys():
             all_groups[group] = None
     reader = H5Reader(input_file)
-    num_jets = reader.num_jets
+    num_jets = reader.num_jets if N == -1 else N
     writer = None
     additional_vars = {}
 
@@ -455,7 +412,7 @@ def write_sample_with_weights(
  
 
 
-def plot_hist(data, var, bins, weights, fname, label='flavour_label'):
+def plot_hist(data, var, bins, weights, plot_dir, fname, label='flavour_label'):
 
     plot = HistogramPlot(
         xlabel=f"{var}",
@@ -511,12 +468,14 @@ def plot_hist(data, var, bins, weights, fname, label='flavour_label'):
     plot = HistogramPlot(
         xlabel="Weights",
         ylabel="Normalised Number of objects",
+        logx=True,
         logy=True,
         bins=w_bins,
         n_ratio_panels=1,
     )
 
     has_ratio = False
+    # w_bins = np.logspace(np.log10(np.min(weights[weights > 0])), np.log10(np.max(weights)), 100)
     for i, cls in enumerate(np.unique(data[label])):
         mask = ((data[label] == cls) & (~np.isnan(data[var])))
         if np.sum(mask) == 0:
@@ -530,88 +489,25 @@ def plot_hist(data, var, bins, weights, fname, label='flavour_label'):
     plot.draw()
     plot.savefig(path)
 
-def make_plots(all_rw, fpath):
+def make_plots(all_rw, fpath, plot_dir, N=5_000_000):
+    '''
+    Plot the histograms for the reweighting
+    Parameters
+    ----------
+    all_rw : list[Reweight]
+        List of reweight objects
+    fpath : str
+        Path to the HDF5 file containing jets and each jet weight
+    '''
 
     h5 = h5py.File(fpath, "r")
-
+    plot_dir.mkdir(exist_ok=True, parents=True)
     for rw in all_rw:
-        data = h5[rw.group][:]
+        data = h5[rw.group][:N]
 
-        for v, b in zip(rw.reweight_vars, rw.bins):
-            weights = h5[rw.group][f'{repr(rw)}']
-            plot_hist(data, v, b, weights, rw, label=rw.class_var)
-
-
-
-
-# input_file="/home/xzcappon/phd/datasets/vertexing_120m/output/pp_output_val.h5"
-# out_file="/home/xzcappon/phd/datasets/vertexing_120m/output/pp_output_val_weighted_test.h5"
-# hists_dir="/home/xzcappon/phd/datasets/vertexing_120m/output/hists_val_test.h5"
-# plot_dir="rw_plots/val"
-# plot_dir = Path(hists_dir).parent / plot_dir
-# plot_dir.mkdir(exist_ok=True, parents=True)
-
-# file = h5py.File(input_file, "r")
-
-# pt_bins = np.linspace(20_000, 6_000_000, 50)
-# abs_eta_bins = np.linspace(0, 2.5, 20)
-# eta_bins = np.linspace(-2.5, 2.5, 40)
-# th_pt_bins = np.linspace(5_000, 5600000.0, 50)
-# th_lxy_bins = np.concatenate([
-#     np.linspace(0, 50, 50)[:-1],
-#     np.linspace(50, 250, 20)[:-1],
-#     np.linspace(250, 1500, 20),
-#     np.array([3000])
-#     ])
-
-# phi_bins = np.linspace(-3.2, 3.2, 50)
-
-# all_reweights = [
-    
-#     Reweight(
-#         group='truth_hadrons',
-#         reweight_vars=['pt'],
-#         bins=[th_pt_bins],
-#         class_var='flavour',
-#         class_target='mean',
-#     ),
-#     Reweight(
-#         group='truth_hadrons',
-#         reweight_vars=['eta'],
-#         bins=[eta_bins],
-#         class_var='flavour',
-#         class_target='mean',
-#     ),
-#     Reweight(
-#         group='truth_hadrons',
-#         reweight_vars=['phi'],
-#         bins=[phi_bins],
-#         class_var='flavour',
-#         class_target='mean',
-#     ),
-#     Reweight(
-#         group='truth_hadrons',
-#         reweight_vars=['energy'],
-#         bins=[pt_bins],
-#         class_var='flavour',
-#         class_target='mean',
-#     ),
-#     Reweight(
-#         group='truth_hadrons',
-#         reweight_vars=['Lxy'],
-#         bins=[th_lxy_bins],
-#         class_var='flavour',
-#         class_target='mean',
-#     ),
-#     Reweight(
-#         group='jets',
-#         reweight_vars=['pt_btagJes', 'absEta_btagJes'],
-#         bins=[pt_bins, abs_eta_bins],
-#         class_var='flavour_label',
-#         class_target='mean',
-#     ),
-# ]
-
+        for v, b in zip(rw.reweight_vars, rw.flat_bins):
+            weights = h5[rw.group][:N][f'{repr(rw)}']
+            plot_hist(data, v, b, weights, plot_dir, rw, label=rw.class_var)
 
 
 
@@ -622,7 +518,7 @@ def main(args=None):
     config = ReweightConfig.from_file(args.config)
 
     if not config.hist_path.exists():
-        calculated_weights = calculate_weights(config.train_in_path, config.reweights)
+        calculated_weights = calculate_weights(config.train_in_path, config.reweights, N=100_000_000)
         save_weights_hdf5(calculated_weights, config.hist_path)
     else:
         print("Loading weights from ", config.hist_path)
@@ -633,18 +529,22 @@ def main(args=None):
     write_sample_with_weights(
         config.train_in_path,
         config.train_out_path,
-        calculated_weights
+        calculated_weights,
     )
+    print("Finished writing training file!")
 
-    make_plots(config.reweights, config.plot_dir / 'training')
+    print("Making plots...")
+    make_plots(config.reweights,config.train_out_path, config.plot_dir / 'training')
 
     print("Running validation file...")
     write_sample_with_weights(
         config.val_in_path,
         config.val_out_path,
-        calculated_weights
+        calculated_weights,
     )
-    make_plots(config.reweights, config.plot_dir / 'validation') 
+    print("Finished writing validation file!")
+    print("Making plots...")
+    make_plots(config.reweights, config.val_out_path, config.plot_dir / 'validation') 
 
 if __name__ == "__main__":
     main()
