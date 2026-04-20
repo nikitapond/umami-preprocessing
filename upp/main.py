@@ -182,7 +182,10 @@ def parse_args(args: Any) -> argparse.Namespace:
         "rw_merge",
         "rw_merge_idx",
     ]
-    if not any(v for a, v in d.items() if a not in ignore):
+    # Don't activate default-all if a reweighting-specific flag was passed
+    # (--reweight / --rw-merge are standalone stages that don't need prep/resample/merge/norm)
+    rw_only = d.get("reweight") or d.get("rw_merge")
+    if not rw_only and not any(v for a, v in d.items() if a not in ignore):
         for v in d:
             if v not in ignore and d[v] is None:
                 d[v] = True
